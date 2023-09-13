@@ -1,0 +1,15 @@
+[package]
+name = "obs-audio-renderer"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+bindings = { path = "./bindings" }
+
+[build-dependencies]
+cc = { version = "1.0" }
