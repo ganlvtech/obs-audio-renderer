@@ -167,6 +167,8 @@ void main(void) {
     let audioBufferIndex = 0;
     const packetIndexArray = [];
     let packetIndex = 0;
+    const amplifierArray = [];
+    let amplifier = 1.0;
 
     for (let y = 0; y < height; y += cellHeight) {
       for (let x = 0; x < width; x += cellWidth) {
@@ -192,11 +194,19 @@ void main(void) {
                 (packetIndexArray[2] ? 0x4 : 0) |
                 (packetIndexArray[3] ? 0x8 : 0);
           }
+        } else if (amplifierArray.length < 4) { // buffer 前 4 个数据点是包序号，用于同步
+          amplifierArray.push((r + g + b) / 3 > 128);
+          if (amplifierArray.length >= 4) {
+            amplifier = (amplifierArray[0] ? 0x1 : 0) |
+                (amplifierArray[1] ? 0x2 : 0) |
+                (amplifierArray[2] ? 0x4 : 0) |
+                (amplifierArray[3] ? 0x8 : 0) + 1;
+          }
         } else {
           if (r < 16 && g < 16 && b < 16) {
             return [audioBuffer.subarray(0, audioBufferIndex), packetIndex];
           }
-          audioBuffer[audioBufferIndex] = decodeAudioSample(r, g, b);
+          audioBuffer[audioBufferIndex] = decodeAudioSample(r, g, b) / amplifier;
           audioBufferIndex++;
         }
       }

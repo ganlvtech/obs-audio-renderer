@@ -13,21 +13,29 @@ const MAX_AUDIO_SOURCE_COUNT: usize = 4;
 pub static mut AUDIO_RENDERER_LIST: Mutex<Vec<*mut AudioRenderer>> = Mutex::new(Vec::new());
 
 /// 将 `data` f32 数组使用 [`encode_audio_sample`] 编码为 BGRA 格式并填充到 `buf` u8 数组中
-fn fill_texture_buffer(texture_buffer: &mut [u8], mut audio_buffer: impl Iterator<Item=f32>, width: usize, cell_width: usize, cell_height: usize, packet_index: usize) {
+fn fill_texture_buffer(texture_buffer: &mut [u8], mut audio_buffer: impl Iterator<Item=f32>, width: usize, cell_width: usize, cell_height: usize, packet_index: u32, amplifier: f32) {
+    let amplifier = amplifier.clamp(1.0, 16.9).floor();
+    let amplifier_u32 = amplifier as u32 - 1;
+    // buffer 第 1~4 个数据点是包序号，用于同步
+    // buffer 第 5~8 个数据点是音量缩放系数，取值范围是 0 ~ 15
+    // 0 表示不缩放（通常用于 0 ~ -3dB 左右的声音）
+    // 15 表示振幅放大到原来的 16 倍（通常用于 -24dB 的声音）
     let prefix = [
-        packet_index & 0x1 != 0,
-        packet_index & 0x2 != 0,
-        packet_index & 0x4 != 0,
-        packet_index & 0x8 != 0,
+        if packet_index & 0x1 != 0 { 255u8 } else { 0u8 },
+        if packet_index & 0x2 != 0 { 255u8 } else { 0u8 },
+        if packet_index & 0x4 != 0 { 255u8 } else { 0u8 },
+        if packet_index & 0x8 != 0 { 255u8 } else { 0u8 },
+        if amplifier_u32 & 0x1 != 0 { 255u8 } else { 0u8 },
+        if amplifier_u32 & 0x2 != 0 { 255u8 } else { 0u8 },
+        if amplifier_u32 & 0x4 != 0 { 255u8 } else { 0u8 },
+        if amplifier_u32 & 0x8 != 0 { 255u8 } else { 0u8 },
     ];
     let mut prefix_iter = prefix.into_iter();
-
     let height = texture_buffer.len() / 4 / width;
     let cell_pixel_count = cell_width * cell_height;
     for y in (0..height).step_by(cell_height) {
         for x in (0..width).step_by(cell_width) {
-            if let Some(v ) = prefix_iter.next() { // buffer 前 4 个数据点是包序号，用于同步
-                let gray = if v { 255u8 } else { 0u8 };
+            if let Some(gray) = prefix_iter.next() {
                 for j in 0..cell_height {
                     for i in 0..cell_width {
                         let texture_buffer_index = 4 * ((y + j) * width + (x + i)); // 因为 buf 中的存储格式是 BGRX，所以需要乘以 4
@@ -40,7 +48,7 @@ fn fill_texture_buffer(texture_buffer: &mut [u8], mut audio_buffer: impl Iterato
             } else if let Some(v) = audio_buffer.next() {
                 // 音频部分
                 // 音频数据编码到 16.0 ~ 256.0 范围
-                let v1 = 16.0 + 120.0 * (v + 1.0);
+                let v1 = 16.0 + 120.0 * (v * amplifier + 1.0);
                 let mut n = (cell_pixel_count * 2) as f32;
                 let mut v2 = v1 * n;
                 for j in 0..cell_height {
@@ -344,10 +352,12 @@ unsafe extern "C" fn video_render(data: *mut ::std::os::raw::c_void, effect: *mu
         }).min().unwrap_or(0);
         let sample_count = min_source_sample_number.saturating_sub(base_sample_number);
         if sample_count >= audio_renderer.flush_len {
-            let half_index = audio_renderer.texture_buffer.len() / 2;
             // 一半是左声道，另一半是右声道
-            fill_texture_buffer(&mut audio_renderer.texture_buffer[..half_index], audio_buffer[0].iter().take(sample_count).map(|v| *v), audio_renderer.width, audio_renderer.cell_width, audio_renderer.cell_height, audio_renderer.packet_index);
-            fill_texture_buffer(&mut audio_renderer.texture_buffer[half_index..], audio_buffer[1].iter().take(sample_count).map(|v| *v), audio_renderer.width, audio_renderer.cell_width, audio_renderer.cell_height, audio_renderer.packet_index);
+            let max_0 = audio_buffer[0].iter().take(sample_count).fold(0.00001f32, |acc, v| acc.max(v.abs()));
+            let max_1 = audio_buffer[1].iter().take(sample_count).fold(0.00001f32, |acc, v| acc.max(v.abs()));
+            let half_index = audio_renderer.texture_buffer.len() / 2;
+            fill_texture_buffer(&mut audio_renderer.texture_buffer[..half_index], audio_buffer[0].iter().take(sample_count).map(|v| *v), audio_renderer.width, audio_renderer.cell_width, audio_renderer.cell_height, audio_renderer.packet_index as u32, 1.0 / max_0);
+            fill_texture_buffer(&mut audio_renderer.texture_buffer[half_index..], audio_buffer[1].iter().take(sample_count).map(|v| *v), audio_renderer.width, audio_renderer.cell_width, audio_renderer.cell_height, audio_renderer.packet_index as u32, 1.0 / max_1);
             truncate_front(&mut audio_buffer[0], sample_count);
             truncate_front(&mut audio_buffer[1], sample_count);
             audio_renderer.base_sample_number += sample_count;
