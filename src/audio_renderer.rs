@@ -13,12 +13,31 @@ const MAX_AUDIO_SOURCE_COUNT: usize = 4;
 pub static mut AUDIO_RENDERER_LIST: Mutex<Vec<*mut AudioRenderer>> = Mutex::new(Vec::new());
 
 /// 将 `data` f32 数组使用 [`encode_audio_sample`] 编码为 BGRA 格式并填充到 `buf` u8 数组中
-fn fill_texture_buffer(texture_buffer: &mut [u8], mut audio_buffer: impl Iterator<Item=f32>, width: usize, cell_width: usize, cell_height: usize) {
+fn fill_texture_buffer(texture_buffer: &mut [u8], mut audio_buffer: impl Iterator<Item=f32>, width: usize, cell_width: usize, cell_height: usize, packet_index: usize) {
+    let prefix = [
+        packet_index & 0x1 != 0,
+        packet_index & 0x2 != 0,
+        packet_index & 0x4 != 0,
+        packet_index & 0x8 != 0,
+    ];
+    let mut prefix_iter = prefix.into_iter();
+
     let height = texture_buffer.len() / 4 / width;
     let cell_pixel_count = cell_width * cell_height;
     for y in (0..height).step_by(cell_height) {
         for x in (0..width).step_by(cell_width) {
-            if let Some(v) = audio_buffer.next() {
+            if let Some(v ) = prefix_iter.next() { // buffer 前 4 个数据点是包序号，用于同步
+                let gray = if v { 255u8 } else { 0u8 };
+                for j in 0..cell_height {
+                    for i in 0..cell_width {
+                        let texture_buffer_index = 4 * ((y + j) * width + (x + i)); // 因为 buf 中的存储格式是 BGRX，所以需要乘以 4
+                        texture_buffer[texture_buffer_index + 0] = gray; // B
+                        texture_buffer[texture_buffer_index + 1] = gray; // G
+                        texture_buffer[texture_buffer_index + 2] = gray; // R
+                        texture_buffer[texture_buffer_index + 3] = 255; // A
+                    }
+                }
+            } else if let Some(v) = audio_buffer.next() {
                 // 音频部分
                 // 音频数据编码到 16.0 ~ 256.0 范围
                 let v1 = 16.0 + 120.0 * (v + 1.0);
@@ -138,6 +157,8 @@ pub struct AudioRenderer {
     pub source_sample_number: [usize; MAX_AUDIO_SOURCE_COUNT],
     /// audio_buffer 第一个采样对应的采样序号
     pub base_sample_number: usize,
+    /// 视频帧变化的次数，用作时钟
+    pub packet_index: usize,
 }
 
 pub unsafe fn register() {
@@ -176,6 +197,7 @@ unsafe extern "C" fn filter_create(settings: *mut obs_data_t, _source: *mut obs_
         audio_buffer: Default::default(),
         source_sample_number: Default::default(),
         base_sample_number: 1, // 0 用于默认值
+        packet_index: 0,
     });
     let p = Box::into_raw(audio_renderer);
     filter_update(p as _, settings);
@@ -324,11 +346,12 @@ unsafe extern "C" fn video_render(data: *mut ::std::os::raw::c_void, effect: *mu
         if sample_count >= audio_renderer.flush_len {
             let half_index = audio_renderer.texture_buffer.len() / 2;
             // 一半是左声道，另一半是右声道
-            fill_texture_buffer(&mut audio_renderer.texture_buffer[..half_index], audio_buffer[0].iter().take(sample_count).map(|v| *v), audio_renderer.width, audio_renderer.cell_width, audio_renderer.cell_height);
-            fill_texture_buffer(&mut audio_renderer.texture_buffer[half_index..], audio_buffer[1].iter().take(sample_count).map(|v| *v), audio_renderer.width, audio_renderer.cell_width, audio_renderer.cell_height);
+            fill_texture_buffer(&mut audio_renderer.texture_buffer[..half_index], audio_buffer[0].iter().take(sample_count).map(|v| *v), audio_renderer.width, audio_renderer.cell_width, audio_renderer.cell_height, audio_renderer.packet_index);
+            fill_texture_buffer(&mut audio_renderer.texture_buffer[half_index..], audio_buffer[1].iter().take(sample_count).map(|v| *v), audio_renderer.width, audio_renderer.cell_width, audio_renderer.cell_height, audio_renderer.packet_index);
             truncate_front(&mut audio_buffer[0], sample_count);
             truncate_front(&mut audio_buffer[1], sample_count);
             audio_renderer.base_sample_number += sample_count;
+            audio_renderer.packet_index += 1;
             modified = true;
         }
         // 缓冲长度过大时，清除 buffer，防止延迟过高

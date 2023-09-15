@@ -150,7 +150,7 @@ void main(void) {
    * @param {number} height
    * @param {number} cellWidth
    * @param {number} cellHeight
-   * @returns {Float32Array} 返回声音数据，范围是 -1.0 ~ 1.0
+   * @returns {[Float32Array, number]} 返回声音数据，范围是 -1.0 ~ 1.0
    */
   function decodeRgbaDataToAudio(data, width, height, cellWidth, cellHeight) {
     if (width * height * 4 > data.length) {
@@ -165,6 +165,8 @@ void main(void) {
     const cellPixelCount = cellWidth * cellHeight;
     const audioBuffer = new Float32Array(width * height);
     let audioBufferIndex = 0;
+    const packetIndexArray = [];
+    let packetIndex = 0;
 
     for (let y = 0; y < height; y += cellHeight) {
       for (let x = 0; x < width; x += cellWidth) {
@@ -182,14 +184,24 @@ void main(void) {
         r = r / cellPixelCount;
         g = g / cellPixelCount;
         b = b / cellPixelCount;
-        if (r < 12 && g < 12 && b < 12) {
-          return audioBuffer.subarray(0, audioBufferIndex);
+        if (packetIndexArray.length < 4) { // buffer 前 4 个数据点是包序号，用于同步
+          packetIndexArray.push((r + g + b) / 3 > 128);
+          if (packetIndexArray.length >= 4) {
+            packetIndex = (packetIndexArray[0] ? 0x1 : 0) |
+                (packetIndexArray[1] ? 0x2 : 0) |
+                (packetIndexArray[2] ? 0x4 : 0) |
+                (packetIndexArray[3] ? 0x8 : 0);
+          }
+        } else {
+          if (r < 16 && g < 16 && b < 16) {
+            return [audioBuffer.subarray(0, audioBufferIndex), packetIndex];
+          }
+          audioBuffer[audioBufferIndex] = decodeAudioSample(r, g, b);
+          audioBufferIndex++;
         }
-        audioBuffer[audioBufferIndex] = decodeAudioSample(r, g, b);
-        audioBufferIndex++;
       }
     }
-    return audioBuffer;
+    return [audioBuffer, packetIndex];
   }
 
   /**
@@ -266,26 +278,6 @@ void main(void) {
     }
   }
 
-  /**
-   * 判断数组是否相似，数组长度相差 1%，数据内容相差 1%
-   *
-   * @param {Float32Array} a -1.0 ~ 1.0
-   * @param {Float32Array} b -1.0 ~ 1.0
-   */
-  function isFloat32ArraySimilar(a, b) {
-    const len = Math.min(a.length, b.length);
-    if (Math.abs(a.length - b.length) / len < 0.01) {
-      let sumDiff = 0;
-      for (let i = 0; i < len; i++) {
-        sumDiff += Math.abs(a[i] - b[i]);
-      }
-      if (sumDiff / len < 0.01) {
-        return true;
-      }
-    }
-    return false;
-  }
-
   function run(x, y, width, height, cellWidth, cellHeight) {
     if (width <= 0) {
       throw new Error('width 必须 >= 0');
@@ -321,7 +313,7 @@ void main(void) {
       }
     }
     const playAudioBuffer = newAudioPlayer();
-    let prevLeftChannelData = new Float32Array(0);
+    let prevPacketIndex = null;
     const update = () => {
       if (video.paused) {
         requestAnimationFrame(update);
@@ -329,12 +321,12 @@ void main(void) {
       }
 
       const rgbaData = getVideoRgbaData(x, y, width, height);
-      const leftChannelData = decodeRgbaDataToAudio(rgbaData.subarray(0, rgbaData.length / 2), width, height / 2, cellWidth, cellHeight);
+      const [leftChannelData, packetIndex] = decodeRgbaDataToAudio(rgbaData.subarray(0, rgbaData.length / 2), width, height / 2, cellWidth, cellHeight);
       if (leftChannelData.length >= 240) { // buffer 太短不播放
-        if (!isFloat32ArraySimilar(leftChannelData, prevLeftChannelData)) { // audio buffer 和上一帧相似则不播放
-          const rightChannelData = decodeRgbaDataToAudio(rgbaData.subarray(rgbaData.length / 2, rgbaData.length), width, height / 2, cellWidth, cellHeight);
+        if (packetIndex !== prevPacketIndex) { // audio buffer 和上一帧相似则不播放
+          const [rightChannelData, _] = decodeRgbaDataToAudio(rgbaData.subarray(rgbaData.length / 2, rgbaData.length), width, height / 2, cellWidth, cellHeight);
           playAudioBuffer([leftChannelData, rightChannelData]);
-          prevLeftChannelData = leftChannelData;
+          prevPacketIndex = packetIndex;
         }
       }
       setTimeout(update, 16); // 后台需要播放音乐，所以必须使用 setTimeout。需要在 设置 -> 系统和性能
